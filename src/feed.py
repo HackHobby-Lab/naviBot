@@ -1,34 +1,69 @@
-import cv2
-from flask import Flask, Response
-from picamera2 import Picamera2
+import RPi.GPIO as GPIO
+import socket
+import json
+import time
+import math
 
-# Initialize the Flask app
-app = Flask(__name__)
+# Ultrasonic sensor pins
+TRIG_PINS = [17, 22, 24, 5]
+ECHO_PINS = [18, 23, 25, 6]
+SENSOR_ANGLES = [0, 90, 180, 270]  # Sensor angles
 
-# Initialize the camera
-picam2 = Picamera2()
+# Setup GPIO
+GPIO.setmode(GPIO.BCM)
+for trig in TRIG_PINS:
+    GPIO.setup(trig, GPIO.OUT)
+    GPIO.output(trig, GPIO.LOW)
+for echo in ECHO_PINS:
+    GPIO.setup(echo, GPIO.IN)
 
-# Start the camera preview
-picam2.start()
+# Socket setup
+HOST = "192.168.100.151"  # Host machine's IP address
+PORT = 5000
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-def gen():
-    """Generate frames for streaming"""
+# Function to get distance
+def get_distance(trig_pin, echo_pin):
+    GPIO.output(trig_pin, GPIO.HIGH)
+    time.sleep(0.00001)  # 10 microseconds pulse
+    GPIO.output(trig_pin, GPIO.LOW)
+
+    pulse_start = time.time()
+    while GPIO.input(echo_pin) == GPIO.LOW:
+        pulse_start = time.time()
+        if time.time() - pulse_start > 1:
+            return None
+
+    pulse_end = time.time()
+    while GPIO.input(echo_pin) == GPIO.HIGH:
+        pulse_end = time.time()
+
+    pulse_duration = pulse_end - pulse_start
+    distance = pulse_duration * 17150
+    return round(distance, 2)
+
+try:
     while True:
-        # Capture a frame from the camera
-        frame = picam2.capture_array()
+        wall_points = []
 
-        # Encode the frame in JPEG
-        ret, jpeg = cv2.imencode('.jpg', frame)
-        if ret:
-            # Convert the frame to bytes and yield it
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n\r\n')
+        for i in range(len(TRIG_PINS)):
+            distance = get_distance(TRIG_PINS[i], ECHO_PINS[i])
+            if distance and 5 < distance <= 400:  # Valid range
+                wall_points.append({
+                    "distance": distance,
+                    "angle": SENSOR_ANGLES[i]
+                })
 
-@app.route('/video_feed')
-def video_feed():
-    """Serve the video feed"""
-    return Response(gen(),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+        # Send wall points to the host
+        message = {
+            "wall_points": wall_points,
+            "status": "alive"
+        }
+        sock.sendto(json.dumps(message).encode(), (HOST, PORT))
+        time.sleep(0.2)  # Adjust frequency as needed
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+except KeyboardInterrupt:
+    print("Stopped by user.")
+finally:
+    GPIO.cleanup()
+    sock.close()
